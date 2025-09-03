@@ -3,14 +3,10 @@ using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Runtime;
-
-// Thêm thư viện hệ thống
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-
-// Thêm thư viện JSON đã cài đặt
 using Newtonsoft.Json;
 
 // TẠO BÍ DANH ĐỂ GIẢI QUYẾT XUNG ĐỘT
@@ -20,7 +16,62 @@ namespace MyAutoCAD2026Plugin
 {
     public class DrawingAnalyzer
     {
-        // === LỆNH 1: ĐẾM VÀ XUẤT JSON (Không thay đổi) ===
+        [CommandMethod("SELECT_BY_TYPE")]
+        public static void SelectByType()
+        {
+            Document doc = AcApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            Editor editor = doc.Editor;
+
+            PromptKeywordOptions pko = new PromptKeywordOptions("\nChọn loại đối tượng để chọn tất cả trong không gian hiện tại: ");
+            pko.Keywords.Add("Line");
+            pko.Keywords.Add("Polyline");
+            pko.Keywords.Add("Arc");
+            pko.Keywords.Add("Circle");
+            pko.Keywords.Add("Text");
+            pko.AllowNone = true;
+
+            PromptResult pkr = editor.GetKeywords(pko);
+            if (pkr.Status != PromptStatus.OK) return;
+
+            string selectedType = pkr.StringResult;
+            string filterString = "";
+            switch (selectedType)
+            {
+                case "Line":
+                    filterString = UtilSelection.ALL_LINES;
+                    break;
+                case "Polyline":
+                    filterString = UtilSelection.ALL_POLYLINES;
+                    break;
+                case "Arc":
+                    filterString = UtilSelection.ALL_ARCS;
+                    break;
+                case "Circle":
+                    filterString = UtilSelection.ALL_CIRCLES;
+                    break;
+                case "Text":
+                    filterString = UtilSelection.ALL_TEXTS;
+                    break;
+                default:
+                    editor.WriteMessage("\nLựa chọn không hợp lệ.");
+                    return;
+            }
+
+            SelectionSet sset = UtilSelection.SelectAllObjectsByType(filterString);
+
+            if (sset != null)
+            {
+                editor.WriteMessage($"\nĐã chọn được {sset.Count} đối tượng loại '{selectedType}' trong không gian hiện tại.");
+                editor.SetImpliedSelection(sset.GetObjectIds());
+            }
+            else
+            {
+                editor.WriteMessage($"\nKhông có đối tượng nào loại '{selectedType}' được tìm thấy trong không gian hiện tại.");
+            }
+        }
+
+        #region Previous Commands and Helpers
         [CommandMethod("CountObject_Export")]
         public static void CountObjectAndExport()
         {
@@ -101,102 +152,6 @@ namespace MyAutoCAD2026Plugin
             }
             PromptAndExportJson(acDoc, acEditor, report);
         }
-
-        // === LỆNH 2: CHỌN ĐỐI TƯỢNG THEO LOẠI (Bản nâng cấp, tìm sâu trong block) ===
-        [CommandMethod("SELECT_BY_TYPE")]
-        public static void SelectByType()
-        {
-            Document doc = AcApp.DocumentManager.MdiActiveDocument;
-            if (doc == null) return;
-            Database db = doc.Database;
-            Editor editor = doc.Editor;
-
-            // Bước 1: Hỏi người dùng muốn lọc loại đối tượng nào
-            PromptKeywordOptions pko = new PromptKeywordOptions("\nChọn loại đối tượng muốn lọc (kể cả trong block): ");
-            pko.Keywords.Add("Line");
-            pko.Keywords.Add("Polyline");
-            pko.Keywords.Add("Arc");
-            pko.Keywords.Add("Circle");
-            pko.Keywords.Add("Text");
-            pko.AllowNone = true;
-            PromptResult pkr = editor.GetKeywords(pko);
-            if (pkr.Status != PromptStatus.OK) return;
-
-            string selectedType = pkr.StringResult;
-            string dxfName = selectedType.ToUpper();
-            if (dxfName == "TEXT") dxfName = "MTEXT,TEXT";
-
-            // Bước 2: Yêu cầu người dùng chọn tất cả đối tượng trong một vùng
-            PromptSelectionResult psr = editor.GetSelection();
-            if (psr.Status != PromptStatus.OK) return;
-
-            List<ObjectId> finalResultIds = new List<ObjectId>();
-
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                // Bước 3: Duyệt qua các đối tượng người dùng đã chọn
-                foreach (ObjectId selectedId in psr.Value.GetObjectIds())
-                {
-                    Entity ent = tr.GetObject(selectedId, OpenMode.ForRead) as Entity;
-                    if (ent == null) continue;
-
-                    // Trường hợp 1: Đối tượng là BlockReference
-                    if (ent is BlockReference br)
-                    {
-                        // Mở định nghĩa của block đó ra
-                        BlockTableRecord btr = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
-                        if (btr == null) continue;
-
-                        // Duyệt qua từng đối tượng con bên trong định nghĩa block
-                        foreach (ObjectId idInBlock in btr)
-                        {
-                            Entity subEnt = tr.GetObject(idInBlock, OpenMode.ForRead) as Entity;
-                            if (subEnt == null) continue;
-
-                            // Kiểm tra xem đối tượng con có khớp với loại người dùng chọn không
-                            string typeName = subEnt.GetType().Name.ToUpper();
-                            if (dxfName.Contains(typeName))
-                            {
-                                // QUAN TRỌNG: Chúng ta không thể chọn trực tiếp đối tượng con.
-                                // Chúng ta phải chọn BlockReference chứa nó.
-                                if (!finalResultIds.Contains(br.ObjectId))
-                                {
-                                    finalResultIds.Add(br.ObjectId);
-                                }
-                            }
-                        }
-                    }
-                    // Trường hợp 2: Đối tượng là đối tượng thường, nằm bên ngoài
-                    else
-                    {
-                        // Kiểm tra xem đối tượng này có khớp với loại người dùng chọn không
-                        string typeName = ent.GetType().Name.ToUpper();
-                        if (dxfName.Contains(typeName))
-                        {
-                            if (!finalResultIds.Contains(ent.ObjectId))
-                            {
-                                finalResultIds.Add(ent.ObjectId);
-                            }
-                        }
-                    }
-                }
-                tr.Commit();
-            }
-
-            // Bước 4: Hiển thị kết quả
-            if (finalResultIds.Count > 0)
-            {
-                editor.WriteMessage($"\nĐã tìm thấy {finalResultIds.Count} đối tượng (hoặc block chứa đối tượng) thỏa mãn điều kiện.");
-                editor.SetImpliedSelection(finalResultIds.ToArray());
-            }
-            else
-            {
-                editor.WriteMessage("\nKhông có đối tượng nào thỏa mãn điều kiện được tìm thấy.");
-            }
-        }
-
-
-        #region Helper Functions (Không thay đổi)
         private static void PrintReportToCommandLine(Editor editor, AnalysisReport report)
         {
             editor.WriteMessage("\n\n===== BÁO CÁO PHÂN TÍCH BẢN VẼ =====");
@@ -226,7 +181,6 @@ namespace MyAutoCAD2026Plugin
             }
             editor.WriteMessage("\n\n===== KẾT THÚC BÁO CÁO =====\n");
         }
-
         private static void PromptAndExportJson(Document doc, Editor editor, AnalysisReport report)
         {
             PromptKeywordOptions pko = new PromptKeywordOptions("\nBạn có muốn xuất báo cáo ra file JSON không? ");
@@ -241,7 +195,7 @@ namespace MyAutoCAD2026Plugin
                     string jsonString = JsonConvert.SerializeObject(report, Formatting.Indented);
                     string dwgPath = doc.Name;
                     string jsonFileName = Path.ChangeExtension(dwgPath, ".json");
-                    File.WriteAllText(jsonFileName, jsonString);
+                    File.WriteAllText(jsonFileName, jsonFileName);
                     editor.WriteMessage($"\nĐã xuất báo cáo thành công ra file: {jsonFileName}");
                 }
                 catch (System.Exception ex)
@@ -250,7 +204,6 @@ namespace MyAutoCAD2026Plugin
                 }
             }
         }
-
         private static void CountEntitiesInBtr(BlockTableRecord btr, Transaction tr, Dictionary<string, int> counts)
         {
             if (btr == null || btr.IsErased) return;
