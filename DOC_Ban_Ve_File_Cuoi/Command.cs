@@ -19,35 +19,22 @@ namespace MyAutoCAD2026Plugin
         [CommandMethod("SELECT_BY_TYPE")]
         public static void SelectByType()
         {
-            // Lấy về các đối tượng Document và Editor, là điểm khởi đầu của mọi lệnh
-            Document doc = AcApp.DocumentManager.MdiActiveDocument;
-            if (doc == null) return;
-            Editor editor = doc.Editor;
+            Editor editor = AcApp.DocumentManager.MdiActiveDocument.Editor;
 
-            // Khởi tạo một danh sách rỗng để chứa các điều kiện lọc
-            var filterList = new List<TypedValue>();
-            var selectedTypes = new List<string>();
-
-            // --- BƯỚC 1: HỎI CHẾ ĐỘ CHỌN ---
-            // Tạo một đối tượng để định nghĩa câu hỏi có các từ khóa
+            // --- GIAI ĐOẠN 1: THU THẬP THÔNG TIN THÔ TỪ NGƯỜI DÙNG ---
+            // Hỏi chế độ chọn
             PromptKeywordOptions pkoMode = new PromptKeywordOptions("\nChọn phương thức lựa chọn: ");
-            pkoMode.Keywords.Add("All"); // Thêm từ khóa "All"
-            pkoMode.Keywords.Add("Interactive"); // Thêm từ khóa "Interactive"
-            pkoMode.AllowNone = false; // Bắt buộc người dùng phải chọn một trong hai
-
-            // Hiển thị câu hỏi và lấy kết quả
+            pkoMode.Keywords.Add("All");
+            pkoMode.Keywords.Add("Interactive");
+            pkoMode.AllowNone = false;
             PromptResult pkrMode = editor.GetKeywords(pkoMode);
-            if (pkrMode.Status != PromptStatus.OK) return; // Nếu người dùng nhấn Esc, hủy lệnh
+            if (pkrMode.Status != PromptStatus.OK) return;
+            bool isInteractive = (pkrMode.StringResult == "Interactive");
 
-            // === CODE QUAN TRỌNG 4: LƯU LẠI CHẾ ĐỘ CHỌN ===
-            // Dùng một biến boolean để lưu lại lựa chọn của người dùng
-            bool selectAllMode = (pkrMode.StringResult == "All");
-
-            // --- BƯỚC 2: HỎI LOẠI ĐỐI TƯỢNG (Cho phép chọn nhiều) ---
-            // Bắt đầu một vòng lặp vô tận, sẽ chỉ dừng lại khi người dùng chọn "Done"
+            // Hỏi các loại đối tượng
+            var selectedTypes = new List<string>();
             while (true)
             {
-                // Xây dựng câu thông báo một cách linh hoạt
                 string message = "\nChọn loại đối tượng";
                 if (selectedTypes.Count > 0)
                 {
@@ -55,7 +42,6 @@ namespace MyAutoCAD2026Plugin
                 }
                 message += ": ";
 
-                // Hiển thị danh sách các loại đối tượng
                 PromptKeywordOptions pko = new PromptKeywordOptions(message);
                 pko.Keywords.Add("Line");
                 pko.Keywords.Add("Polyline");
@@ -64,7 +50,7 @@ namespace MyAutoCAD2026Plugin
                 pko.Keywords.Add("Text");
                 if (selectedTypes.Count > 0)
                 {
-                    pko.Keywords.Add("Done"); // Chỉ hiển thị nút "Done" khi đã có ít nhất 1 lựa chọn
+                    pko.Keywords.Add("Done");
                 }
                 pko.AllowNone = true;
 
@@ -72,99 +58,45 @@ namespace MyAutoCAD2026Plugin
                 if (pkrType.Status != PromptStatus.OK) return;
 
                 string result = pkrType.StringResult;
-                if (result == "Done")
-                {
-                    break; // Thoát khỏi vòng lặp
-                }
+                if (result == "Done") break;
 
-                // Thêm lựa chọn vào danh sách nếu nó chưa tồn tại
-                if (!selectedTypes.Contains(result))
-                {
-                    selectedTypes.Add(result);
-                }
+                if (!selectedTypes.Contains(result)) selectedTypes.Add(result);
             }
-
             if (selectedTypes.Count == 0)
             {
-                editor.WriteMessage("\nChưa chọn loại đối tượng nào. Lệnh đã hủy.");
+                editor.WriteMessage("\nChưa chọn loại đối tượng. Lệnh đã hủy.");
                 return;
             }
 
-            // Gom nhóm các lựa chọn thành một chuỗi lọc OR duy nhất
-            List<string> dxfNames = new List<string>();
-            foreach (var type in selectedTypes)
-            {
-                switch (type)
-                {
-                    case "Line": dxfNames.Add(UtilSelection.ALL_LINES); break;
-                    case "Polyline": dxfNames.Add(UtilSelection.ALL_POLYLINES); break;
-                    case "Arc": dxfNames.Add(UtilSelection.ALL_ARCS); break;
-                    case "Circle": dxfNames.Add(UtilSelection.ALL_CIRCLES); break;
-                    case "Text": dxfNames.Add(UtilSelection.ALL_TEXTS); break;
-                }
-            }
-            string finalFilterString = string.Join(",", dxfNames.Distinct());
-            // Thêm điều kiện lọc theo loại vào danh sách
-            filterList.Add(new TypedValue((int)DxfCode.Start, finalFilterString));
-
-            // --- BƯỚC 3: HỎI LAYER VÀ MÀU (Tùy chọn) ---
-            // Yêu cầu người dùng nhập tên Layer
-            PromptStringOptions psoLayer = new PromptStringOptions("\nNhập tên Layer để lọc (bỏ trống nếu không cần): ");
+            // Hỏi Layer
+            PromptStringOptions psoLayer = new PromptStringOptions("\nNhập tên Layer (bỏ trống nếu không cần): ");
             psoLayer.AllowSpaces = true;
             PromptResult prLayer = editor.GetString(psoLayer);
             if (prLayer.Status != PromptStatus.OK && prLayer.Status != PromptStatus.None) return;
-            // Nếu người dùng có nhập tên, thêm điều kiện lọc Layer
-            if (!string.IsNullOrWhiteSpace(prLayer.StringResult))
-            {
-                filterList.Add(new TypedValue((int)DxfCode.LayerName, prLayer.StringResult));
-            }
+            string layerName = prLayer.StringResult;
 
-            // Yêu cầu người dùng nhập màu
-            PromptStringOptions psoColor = new PromptStringOptions("\nNhập tên màu (Red, Yellow...) hoặc mã số (1-256) để lọc (bỏ trống nếu không cần): ");
+            // Hỏi Màu
+            PromptStringOptions psoColor = new PromptStringOptions("\nNhập tên màu (bỏ trống nếu không cần): ");
             psoColor.AllowSpaces = false;
             PromptResult prColor = editor.GetString(psoColor);
             if (prColor.Status != PromptStatus.OK && prColor.Status != PromptStatus.None) return;
-            // Nếu người dùng có nhập màu
-            if (!string.IsNullOrWhiteSpace(prColor.StringResult))
-            {
-                short colorIndex = UtilSelection.ConvertColorNameToIndex(prColor.StringResult);
-                // Nếu màu hợp lệ, thêm điều kiện lọc Màu
-                if (colorIndex != -1)
-                {
-                    filterList.Add(new TypedValue((int)DxfCode.Color, colorIndex));
-                }
-                else
-                {
-                    editor.WriteMessage("\nTên hoặc mã màu không hợp lệ, bộ lọc màu sẽ được bỏ qua.");
-                }
-            }
+            string colorName = prColor.StringResult;
 
-            // --- BƯỚC 4: GỌI HÀM TIỆN ÍCH PHÙ HỢP VÀ HIỂN THỊ KẾT QUẢ ---
-            SelectionSet sset = null;
-            // Dựa vào lựa chọn ở Bước 1, gọi hàm tiện ích tương ứng
-            if (selectAllMode)
-            {
-                // Gọi hàm chọn tất cả
-                sset = UtilSelection.SelectAllObjects(filterList);
-            }
-            else
-            {
-                // Gọi hàm chọn tương tác
-                sset = UtilSelection.GetSelection(filterList);
-            }
+            // --- GIAI ĐOẠN 2: GỌI "CỖ MÁY" VÀ XỬ LÝ KẾT QUẢ ---
+            // Chỉ một dòng lệnh duy nhất để thực hiện toàn bộ công việc phức tạp
+            SelectionSet sset = UtilSelection.SelectObjectsByCriteria(selectedTypes, layerName, colorName, isInteractive);
 
-            // Xử lý kết quả cuối cùng
             if (sset != null)
             {
                 editor.WriteMessage($"\nĐã chọn được {sset.Count} đối tượng thỏa mãn điều kiện.");
-                // Làm nổi bật các đối tượng đã chọn
                 editor.SetImpliedSelection(sset.GetObjectIds());
             }
             else
             {
-                editor.WriteMessage("\nKhông có đối tượng nào thỏa mãn điều kiện được tìm thấy/lựa chọn.");
+                editor.WriteMessage("\nKhông có đối tượng nào được tìm thấy/lựa chọn.");
             }
         }
+
 
         #region Previous Commands and Helpers
         [CommandMethod("CountObject_Export")]

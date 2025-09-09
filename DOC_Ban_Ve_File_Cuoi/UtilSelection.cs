@@ -12,37 +12,86 @@ namespace MyAutoCAD2026Plugin
 {
     public static class UtilSelection
     {
-        // === CODE QUAN TRỌNG 1: ĐỊNH NGHĨA SẴN CÁC BỘ LỌC ===
-        // Các hằng số này giúp code dễ đọc và dễ bảo trì.
+        // Các hằng số vẫn giữ nguyên vai trò quan trọng
         public const string ALL_POLYLINES = "LWPOLYLINE,POLYLINE,POLYLINE2D,POLYLINE3D";
         public const string ALL_LINES = "LINE";
         public const string ALL_ARCS = "ARC";
         public const string ALL_CIRCLES = "CIRCLE";
         public const string ALL_TEXTS = "MTEXT,TEXT";
-        
+        public const string LINE_AND_POLYLINE = "LINE,LWPOLYLINE,POLYLINE,POLYLINE2D,POLYLINE3D";
 
         /// <summary>
-        /// Chế độ 1: Tự động chọn TẤT CẢ các đối tượng dựa trên bộ lọc.
+        /// Phương thức lựa chọn TẤT CẢ TRONG MỘT, xử lý mọi logic lọc.
         /// </summary>
-        public static SelectionSet SelectAllObjects(List<TypedValue> filterList)
+        /// <param name="objectTypes">Danh sách các loại đối tượng người dùng đã chọn (ví dụ: "Line", "Polyline").</param>
+        /// <param name="layerName">Tên layer để lọc (có thể là chuỗi rỗng).</param>
+        /// <param name="colorName">Tên màu hoặc mã màu để lọc (có thể là chuỗi rỗng).</param>
+        /// <param name="isInteractive">True nếu muốn chọn tương tác, False nếu muốn chọn tất cả.</param>
+        /// <returns>Tập hợp các đối tượng được chọn.</returns>
+        public static SelectionSet SelectObjectsByCriteria(List<string> objectTypes, string layerName, string colorName, bool isInteractive)
         {
             Document doc = AcApp.DocumentManager.MdiActiveDocument;
-            if (doc == null || filterList == null || filterList.Count == 0) return null;
+            if (doc == null || objectTypes == null || objectTypes.Count == 0) return null;
             Editor editor = doc.Editor;
 
-            // Nếu có nhiều hơn 1 điều kiện, tự động bọc chúng trong một toán tử AND
+            // --- TOÀN BỘ LOGIC XÂY DỰNG BỘ LỌC ĐÃ ĐƯỢC CHUYỂN VÀO ĐÂY ---
+            var filterList = new List<TypedValue>();
+
+            // 1. Xử lý logic OR cho các loại đối tượng
+            List<string> dxfNames = new List<string>();
+            foreach (var type in objectTypes)
+            {
+                switch (type)
+                {
+                    case "Line": dxfNames.Add(ALL_LINES); break;
+                    case "Polyline": dxfNames.Add(ALL_POLYLINES); break;
+                    case "Arc": dxfNames.Add(ALL_ARCS); break;
+                    case "Circle": dxfNames.Add(ALL_CIRCLES); break;
+                    case "Text": dxfNames.Add(ALL_TEXTS); break;
+                }
+            }
+            string finalFilterString = string.Join(",", dxfNames.Distinct());
+            filterList.Add(new TypedValue((int)DxfCode.Start, finalFilterString));
+
+            // 2. Xử lý logic cho Layer (nếu có)
+            if (!string.IsNullOrWhiteSpace(layerName))
+            {
+                filterList.Add(new TypedValue((int)DxfCode.LayerName, layerName));
+            }
+
+            // 3. Xử lý logic cho Màu (nếu có)
+            if (!string.IsNullOrWhiteSpace(colorName))
+            {
+                short colorIndex = ConvertColorNameToIndex(colorName);
+                if (colorIndex != -1)
+                {
+                    filterList.Add(new TypedValue((int)DxfCode.Color, colorIndex));
+                }
+                else
+                {
+                    editor.WriteMessage($"\nMàu '{colorName}' không hợp lệ, bộ lọc màu bị bỏ qua.");
+                }
+            }
+
+            // 4. Xử lý logic AND để kết hợp các điều kiện
             if (filterList.Count > 1)
             {
                 filterList.Insert(0, new TypedValue((int)DxfCode.Operator, "<AND"));
                 filterList.Add(new TypedValue((int)DxfCode.Operator, "AND>"));
             }
 
-            // Tạo đối tượng SelectionFilter từ danh sách các điều kiện
             SelectionFilter filter = new SelectionFilter(filterList.ToArray());
+            PromptSelectionResult psr;
 
-            // === CODE QUAN TRỌNG 2: SỬ DỤNG editor.SelectAll() ===
-            // Yêu cầu bộ máy AutoCAD quét toàn bộ bản vẽ và trả về kết quả
-            PromptSelectionResult psr = editor.SelectAll(filter);
+            // 5. Quyết định gọi GetSelection hay SelectAll
+            if (isInteractive)
+            {
+                psr = editor.GetSelection(filter);
+            }
+            else
+            {
+                psr = editor.SelectAll(filter);
+            }
 
             if (psr.Status == PromptStatus.OK)
                 return psr.Value;
@@ -50,36 +99,7 @@ namespace MyAutoCAD2026Plugin
                 return null;
         }
 
-        /// <summary>
-        /// Chế độ 2: Yêu cầu người dùng quét chọn đối tượng dựa trên bộ lọc.
-        /// </summary>
-        public static SelectionSet GetSelection(List<TypedValue> filterList)
-        {
-            Document doc = AcApp.DocumentManager.MdiActiveDocument;
-            if (doc == null || filterList == null || filterList.Count == 0) return null;
-            Editor editor = doc.Editor;
-
-            if (filterList.Count > 1)
-            {
-                filterList.Insert(0, new TypedValue((int)DxfCode.Operator, "<AND"));
-                filterList.Add(new TypedValue((int)DxfCode.Operator, "AND>"));
-            }
-
-            SelectionFilter filter = new SelectionFilter(filterList.ToArray());
-
-            // === CODE QUAN TRỌNG 3: SỬ DỤNG editor.GetSelection() ===
-            // Yêu cầu người dùng tương tác bằng chuột (quét cửa sổ, đa giác...)
-            PromptSelectionResult psr = editor.GetSelection(filter);
-
-            if (psr.Status == PromptStatus.OK)
-                return psr.Value;
-            else
-                return null;
-        }
-
-        /// <summary>
-        /// "Phiên dịch" tên màu sang mã số màu (Color Index) của AutoCAD.
-        /// </summary>
+        // Hàm ConvertColorNameToIndex giữ nguyên
         public static short ConvertColorNameToIndex(string colorName)
         {
             if (string.IsNullOrWhiteSpace(colorName)) return -1;
