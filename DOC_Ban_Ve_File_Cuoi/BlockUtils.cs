@@ -2,15 +2,88 @@
 using Autodesk.AutoCAD.Geometry;
 using System;
 using System.Collections.Generic;
-using System.IO; // Cần cho FileShare
+using System.IO;
 
-// TẠO BÍ DANH
-using AcColor = Autodesk.AutoCAD.Colors.Color;
-
-namespace MyAutoCAD2026Plugin
+// Namespace giúp tổ chức code, tránh xung đột tên.
+namespace MyAutoCAD2026Plugin.Backend
 {
     /// <summary>
-    /// Lớp tiện ích Backend, chứa các hàm để thao tác với Block trong Database của AutoCAD.
+    /// (Backend) Lớp tiện ích để tạo và quản lý Layer.
+    /// Hoạt động hoàn toàn trên Database.
+    /// </summary>
+    public static class LayerUtils
+    {
+        /// <summary>
+        /// Đảm bảo một layer tồn tại trong Database. Nếu chưa có, sẽ tạo mới.
+        /// </summary>
+        /// <param name="db">Database đích.</param>
+        /// <param name="layerName">Tên layer cần kiểm tra/tạo.</param>
+        /// <returns>ObjectId của LayerTableRecord.</returns>
+        public static ObjectId EnsureLayerExists(Database db, string layerName)
+        {
+            // Bắt đầu một Transaction để tương tác với Database.
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                // Lấy LayerTable từ Database để quản lý các layer.
+                // Mở ở chế độ đọc (ForRead) trước cho hiệu năng.
+                LayerTable lt = tr.GetObject(db.LayerTableId, OpenMode.ForRead) as LayerTable;
+
+                // Kiểm tra xem layer đã tồn tại chưa.
+                if (lt.Has(layerName))
+                {
+                    // Nếu đã có, chỉ cần trả về ObjectId của nó.
+                    return lt[layerName];
+                }
+                else
+                {
+                    // Nếu chưa có, chúng ta cần tạo mới.
+                    // Phải nâng cấp quyền của LayerTable lên chế độ ghi (ForWrite).
+                    lt.UpgradeOpen();
+
+                    // Tạo một đối tượng LayerTableRecord mới trong bộ nhớ.
+                    using (LayerTableRecord ltr = new LayerTableRecord())
+                    {
+                        // Gán tên cho layer. Đây là thuộc tính quan trọng nhất.
+                        ltr.Name = layerName;
+                        // Bạn có thể gán các thuộc tính khác ở đây, ví dụ: màu sắc.
+                        // ltr.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(ColorMethod.ByAci, 1); // Màu đỏ
+
+                        // Thêm layer mới vào LayerTable.
+                        ObjectId newLayerId = lt.Add(ltr);
+                        // Báo cho Transaction biết về đối tượng mới được tạo này.
+                        tr.AddNewlyCreatedDBObject(ltr, true);
+
+                        // Lưu lại tất cả các thay đổi vào Database.
+                        tr.Commit();
+
+                        // Trả về ObjectId của layer vừa tạo.
+                        return newLayerId;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// (Backend) Lớp dùng để đóng gói tất cả các thuộc tính khi chèn một BlockReference.
+    /// Giúp cho chữ ký của hàm InsertBlockReference gọn gàng hơn.
+    /// </summary>
+    public class BlockProperties
+    {
+        public Point3d Position { get; set; } = Point3d.Origin;
+        public Scale3d Scale { get; set; } = new Scale3d(1.0);
+        public double Rotation { get; set; } = 0.0;
+        public Dictionary<string, object> DynamicProperties { get; set; }
+
+        public BlockProperties()
+        {
+            DynamicProperties = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+
+    /// <summary>
+    /// (Backend) Lớp tiện ích chính, chứa các hàm để thao tác với Block trong Database của AutoCAD.
     /// Lớp này không chứa bất kỳ mã nào tương tác với người dùng (Editor).
     /// </summary>
     public static class BlockUtils
@@ -25,59 +98,70 @@ namespace MyAutoCAD2026Plugin
         /// <returns>ObjectId của BlockTableRecord đã được nhập khẩu, hoặc ObjectId.Null nếu thất bại.</returns>
         public static ObjectId ImportBlockDefinition(Database targetDb, string sourceFilePath, string blockName)
         {
-            ObjectId blockDefId = ObjectId.Null;
-
-            // Mở một database tạm thời để đọc file DWG nguồn
+            // --- PHẦN CODE QUAN TRỌNG: ĐỌC DATABASE TỪ FILE NGOÀI ---
+            // Mở một database tạm thời trong bộ nhớ để đọc file DWG nguồn.
+            // 'false' nghĩa là không tạo file mới, 'true' nghĩa là đọc file có sẵn.
             using (Database sourceDb = new Database(false, true))
             {
                 try
                 {
-                    // Đọc file DWG từ đường dẫn. FileShare.Read cho phép các tiến trình khác đọc file này.
+                    // Đọc nội dung file DWG vào đối tượng sourceDb.
+                    // FileShare.Read cho phép các ứng dụng khác vẫn có thể đọc file này trong lúc ta đang xử lý.
                     sourceDb.ReadDwgFile(sourceFilePath, FileShare.Read, true, "");
                 }
-                catch (System.Exception) // Bắt lỗi chung như file không tồn tại, file lỗi...
+                catch (Autodesk.AutoCAD.Runtime.Exception ex)
                 {
-                    return ObjectId.Null; // Trả về Null nếu không đọc được file
+                    // Bắt các lỗi cụ thể của AutoCAD, ví dụ file không tìm thấy, phiên bản không hỗ trợ...
+                    // Trong backend, ta không hiển thị thông báo. Có thể ghi log lỗi ở đây.
+                    System.Diagnostics.Debug.WriteLine($"Lỗi khi đọc file DWG: {ex.Message}");
+                    return ObjectId.Null; // Trả về Null báo hiệu thất bại.
                 }
 
-                // Bắt đầu transaction trên cả hai database
+                // --- PHẦN CODE QUAN TRỌNG: SAO CHÉP DỮ LIỆU GIỮA 2 DATABASE ---
+                // Bắt đầu transaction trên cả hai database.
                 using (Transaction sourceTrans = sourceDb.TransactionManager.StartTransaction())
                 using (Transaction targetTrans = targetDb.TransactionManager.StartTransaction())
                 {
+                    // Lấy BlockTable từ database nguồn.
                     BlockTable sourceBt = sourceTrans.GetObject(sourceDb.BlockTableId, OpenMode.ForRead) as BlockTable;
 
-                    // Kiểm tra xem block có tồn tại trong file nguồn không
+                    // Kiểm tra xem block có tồn tại trong file nguồn không.
                     if (!sourceBt.Has(blockName))
                     {
-                        return ObjectId.Null; // Trả về Null nếu block không có trong file nguồn
+                        return ObjectId.Null;
                     }
 
+                    // Lấy BlockTable từ database đích.
                     BlockTable targetBt = targetTrans.GetObject(targetDb.BlockTableId, OpenMode.ForRead) as BlockTable;
 
-                    // Nếu block đã có trong bản vẽ đích, chỉ lấy ObjectId của nó
+                    // Nếu block đã có trong bản vẽ đích, chỉ cần lấy ObjectId của nó và trả về.
                     if (targetBt.Has(blockName))
                     {
-                        blockDefId = targetBt[blockName];
-                    }
-                    else // Nếu chưa có, tiến hành nhập khẩu
-                    {
-                        // Nâng cấp quyền để có thể ghi vào BlockTable đích
-                        targetBt.UpgradeOpen();
-
-                        ObjectIdCollection idsToCopy = new ObjectIdCollection();
-                        idsToCopy.Add(sourceBt[blockName]);
-
-                        // Sao chép định nghĩa block từ sourceDb sang targetDb
-                        IdMapping idMap = new IdMapping();
-                        targetDb.WblockCloneObjects(idsToCopy, targetBt.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
-
-                        blockDefId = idMap[sourceBt[blockName]].Value;
+                        return targetBt[blockName];
                     }
 
+                    // Nếu chưa có, tiến hành nhập khẩu.
+                    // Chuẩn bị một collection chứa ObjectId của các đối tượng cần sao chép.
+                    ObjectIdCollection idsToCopy = new ObjectIdCollection();
+                    idsToCopy.Add(sourceBt[blockName]);
+
+                    // Nâng cấp quyền để có thể ghi vào BlockTable đích.
+                    targetBt.UpgradeOpen();
+
+                    // Đây là hàm "phép màu" của AutoCAD API. Nó sẽ sao chép các đối tượng
+                    // từ sourceDb sang targetDb.
+                    // DuplicateRecordCloning.Replace: Nếu một đối tượng phụ thuộc (ví dụ layer)
+                    // đã tồn tại ở đích, nó sẽ được thay thế bằng cái từ nguồn.
+                    IdMapping idMap = new IdMapping();
+                    targetDb.WblockCloneObjects(idsToCopy, targetBt.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
+
+                    // Commit transaction đích để lưu lại block mới.
                     targetTrans.Commit();
+
+                    // Lấy ObjectId của block mới được tạo ra trong database đích.
+                    return idMap[sourceBt[blockName]].Value;
                 }
             }
-            return blockDefId;
         }
 
 
@@ -85,65 +169,90 @@ namespace MyAutoCAD2026Plugin
         /// (Backend) Chèn một BlockReference (có thể là Dynamic Block) vào ModelSpace.
         /// </summary>
         /// <param name="db">Database của bản vẽ cần chèn block.</param>
+        /// <param name="layerName">Tên layer để chèn block vào. Layer sẽ được tạo nếu chưa có.</param>
         /// <param name="blockDefId">ObjectId của BlockTableRecord (định nghĩa block).</param>
-        /// <param name="insertionPoint">Điểm chèn.</param>
-        /// <param name="layerName">Tên layer để chèn block vào.</param>
-        /// <param name="scale">Tỉ lệ chèn.</param>
-        /// <param name="rotationAngle">Góc xoay (radian).</param>
-        /// <param name="dynamicProperties">Từ điển chứa các thuộc tính động cần thay đổi.</param>
+        /// <param name="props">Đối tượng chứa tất cả thuộc tính chèn (vị trí, scale, xoay, dynamic props).</param>
         /// <returns>ObjectId của BlockReference vừa được chèn, hoặc ObjectId.Null nếu thất bại.</returns>
-        public static ObjectId InsertBlockReference(Database db, ObjectId blockDefId, Point3d insertionPoint,
-            string layerName, Scale3d scale, double rotationAngle, Dictionary<string, object> dynamicProperties)
+        public static ObjectId InsertBlockReference(Database db, string layerName, ObjectId blockDefId, BlockProperties props)
         {
-            if (blockDefId.IsNull) return ObjectId.Null;
+            // Kiểm tra đầu vào quan trọng. Nếu định nghĩa block không hợp lệ, không thể tiếp tục.
+            if (blockDefId.IsNull || props == null)
+            {
+                return ObjectId.Null;
+            }
 
-            ObjectId blockRefId = ObjectId.Null;
+            // Bắt đầu transaction để thêm đối tượng mới vào database.
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
+                // Lấy đối tượng BlockTableRecord của ModelSpace để có thể thêm đối tượng vào đó.
+                // Luôn mở ở chế độ ForWrite vì ta sắp thêm entity.
                 BlockTableRecord ms = tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite) as BlockTableRecord;
 
-                // Tạo đối tượng BlockReference trong bộ nhớ
-                using (BlockReference br = new BlockReference(insertionPoint, blockDefId))
+                // --- PHẦN CODE QUAN TRỌNG: TẠO VÀ CẤU HÌNH BLOCKREFERENCE ---
+                // Tạo đối tượng BlockReference trong bộ nhớ, liên kết nó với định nghĩa block.
+                using (BlockReference br = new BlockReference(props.Position, blockDefId))
                 {
-                    // === GÁN CÁC THUỘC TÍNH CƠ BẢN ===
+                    // --- CODE LIÊN QUAN ĐẾN THÔNG SỐ LAYER ---
+                    // Đảm bảo layer tồn tại trước khi gán.
+                    LayerUtils.EnsureLayerExists(db, layerName);
                     br.Layer = layerName;
-                    br.ScaleFactors = scale;
-                    br.Rotation = rotationAngle;
 
-                    // === XỬ LÝ THUỘC TÍNH ĐỘNG (DYNAMIC PROPERTIES) ===
-                    if (br.IsDynamicBlock && dynamicProperties != null)
+                    // --- CODE LIÊN QUAN ĐẾN THÔNG SỐ CƠ BẢN CỦA ĐỐI TƯỢNG ---
+                    br.ScaleFactors = props.Scale; // Gán tỉ lệ
+                    br.Rotation = props.Rotation;   // Gán góc xoay (radian)
+                    // Màu sắc thường được điều khiển bởi layer (ByLayer),
+                    // nhưng nếu muốn gán trực tiếp, dùng:
+                    // br.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(ColorMethod.ByAci, 2); // Màu vàng
+
+                    // Thêm thực thể vào ModelSpace và vào transaction.
+                    ObjectId blockRefId = ms.AppendEntity(br);
+                    tr.AddNewlyCreatedDBObject(br, true);
+
+                    // --- PHẦN CODE QUAN TRỌNG: XỬ LÝ THUỘC TÍNH ĐỘNG (DYNAMIC PROPERTIES) ---
+                    // Chỉ xử lý khi block này thực sự là Dynamic Block và có thuộc tính cần gán.
+                    if (br.IsDynamicBlock && props.DynamicProperties != null && props.DynamicProperties.Count > 0)
                     {
-                        // Duyệt qua từng thuộc tính mà người dùng muốn thay đổi
-                        foreach (var prop in dynamicProperties)
+                        // Lấy collection chứa các thuộc tính động.
+                        DynamicBlockReferencePropertyCollection dynProps = br.DynamicBlockReferencePropertyCollection;
+
+                        // Duyệt qua từng cặp (Tên, Giá trị) mà người dùng muốn thay đổi.
+                        foreach (KeyValuePair<string, object> entry in props.DynamicProperties)
                         {
-                            // Duyệt qua tất cả các thuộc tính động có sẵn của block
-                            foreach (DynamicBlockReferenceProperty dbrProp in br.DynamicBlockReferencePropertyCollection)
+                            // Duyệt qua các thuộc tính có sẵn trong block.
+                            foreach (DynamicBlockReferenceProperty dbrProp in dynProps)
                             {
-                                // Nếu tìm thấy thuộc tính có tên khớp (không phân biệt hoa thường)
-                                if (dbrProp.PropertyName.Equals(prop.Key, StringComparison.OrdinalIgnoreCase))
+                                // So sánh tên thuộc tính (không phân biệt hoa thường) để tìm thuộc tính tương ứng.
+                                if (dbrProp.PropertyName.Equals(entry.Key, StringComparison.OrdinalIgnoreCase))
                                 {
                                     try
                                     {
-                                        // Gán giá trị mới. Đây là nơi "phép màu" xảy ra.
-                                        dbrProp.Value = prop.Value;
-                                        break; // Thoát vòng lặp bên trong khi đã tìm thấy và gán
+                                        // Gán giá trị mới. AutoCAD sẽ tự động cập nhật hình học của block.
+                                        dbrProp.Value = entry.Value;
+                                        // Khi đã tìm thấy và gán xong, thoát vòng lặp bên trong để tối ưu.
+                                        break;
                                     }
-                                    catch (System.Exception)
+                                    catch (Autodesk.AutoCAD.Runtime.Exception)
                                     {
-                                        // Ghi nhận lỗi có thể xảy ra (ví dụ: gán giá trị sai kiểu)
-                                        // Trong backend, ta không hiển thị message, có thể log lỗi hoặc bỏ qua
+                                        // Bỏ qua nếu giá trị gán không hợp lệ (ví dụ: gán chuỗi cho thuộc tính khoảng cách).
+                                        // Có thể thêm log lỗi ở đây.
                                     }
                                 }
                             }
                         }
                     }
 
-                    blockRefId = ms.AppendEntity(br);
-                    tr.AddNewlyCreatedDBObject(br, true);
+                    // --- PHẦN CODE QUAN TRỌNG: XỬ LÝ HATCH ---
+                    // Sau khi tất cả các thuộc tính đã được thay đổi, cần yêu cầu AutoCAD
+                    // vẽ lại đối tượng này để đảm bảo các đối tượng phụ thuộc như Hatch được cập nhật.
+                    br.RecordGraphicsModified(true);
+
+                    // Lưu tất cả thay đổi.
+                    tr.Commit();
+
+                    // Trả về ObjectId của BlockReference vừa được tạo.
+                    return blockRefId;
                 }
-                tr.Commit();
             }
-            return blockRefId;
         }
     }
 }
