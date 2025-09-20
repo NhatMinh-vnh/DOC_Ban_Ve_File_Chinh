@@ -2,141 +2,129 @@
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
+using System.Collections.Generic;
+using System.Linq;
 
 // TẠO BÍ DANH ĐỂ CODE GỌN HƠN
 using AcColor = Autodesk.AutoCAD.Colors.Color;
 
 namespace MyAutoCAD2026Plugin
 {
-    /// <summary>
-    /// Lớp tiện ích Backend, chứa các hàm để thao tác với Database của AutoCAD.
-    /// Lớp này không chứa bất kỳ mã nào tương tác với người dùng (Editor).
-    /// </summary>
+    #region Data Container Class for XData
+
+    public class DoorXData
+    {
+        public string DoorType { get; set; } = string.Empty;
+        public double Height { get; set; }
+        public double Width { get; set; }
+        public ObjectIdCollection ChildIds { get; set; } = new ObjectIdCollection();
+        public const string RegAppName = "MY_DOOR_CREATOR_APP";
+    }
+
+    #endregion
+
     public static class GeometryCreator
     {
         #region Private Helper Methods
 
-        /// <summary>
-        /// (Backend-Private) Lấy ObjectId của một Layer. Nếu Layer chưa tồn tại, hàm sẽ tạo mới.
-        /// Hàm này được gọi nội bộ bởi các hàm tạo hình học khác.
-        /// </summary>
-        /// <param name="db">Database của bản vẽ hiện hành.</param>
-        /// <param name="tr">Transaction đang hoạt động. Hàm này sẽ không tự tạo Transaction mới.</param>
-        /// <param name="layerName">Tên của Layer cần lấy hoặc tạo.</param>
-        /// <returns>ObjectId của Layer tương ứng.</returns>
         private static ObjectId GetOrCreateLayer(Database db, Transaction tr, string layerName)
         {
-            // BẮT BUỘC: Mở bảng Layer (LayerTable) ở chế độ đọc để kiểm tra.
             LayerTable lt = tr.GetObject(db.LayerTableId, OpenMode.ForRead) as LayerTable;
+            if (lt.Has(layerName)) return lt[layerName];
 
-            // Dùng phương thức Has() để kiểm tra sự tồn tại của layer.
-            if (lt.Has(layerName))
+            using (LayerTableRecord newLtr = new LayerTableRecord())
             {
-                // Nếu layer đã tồn tại, trả về ObjectId của nó.
-                return lt[layerName];
+                newLtr.Name = layerName;
+                tr.GetObject(db.LayerTableId, OpenMode.ForWrite);
+                lt.Add(newLtr);
+                tr.AddNewlyCreatedDBObject(newLtr, true);
+                return newLtr.ObjectId;
             }
-            else
+        }
+
+        private static void RegisterApplicationName(Database db, Transaction tr, string appName)
+        {
+            RegAppTable rat = tr.GetObject(db.RegAppTableId, OpenMode.ForRead) as RegAppTable;
+            if (!rat.Has(appName))
             {
-                // Nếu layer chưa tồn tại, ta cần tạo mới.
-                // B1: Tạo một đối tượng LayerTableRecord mới trong bộ nhớ.
-                using (LayerTableRecord newLtr = new LayerTableRecord())
+                using (RegAppTableRecord ratr = new RegAppTableRecord())
                 {
-                    // B2: Gán các thuộc tính cho layer mới.
-                    newLtr.Name = layerName;
-                    // Bạn có thể gán thêm các thuộc tính khác ở đây, ví dụ:
-                    // newLtr.Color = AcColor.FromColorIndex(ColorMethod.ByAci, 1); // Màu đỏ
-
-                    // B3: Nâng cấp quyền của LayerTable lên chế độ ghi để có thể thêm layer mới.
-                    // Đây là một kỹ thuật tối ưu, tránh việc mở để ghi ngay từ đầu nếu không cần thiết.
-                    tr.GetObject(db.LayerTableId, OpenMode.ForWrite); // Lệnh này chỉ để nâng quyền, không cần gán vào biến
-
-                    // B4: Thêm layer mới (đang ở trong bộ nhớ) vào LayerTable.
-                    lt.Add(newLtr);
-
-                    // B5: ĐĂNG KÝ đối tượng vừa tạo với Transaction để nó được lưu vào Database khi Commit.
-                    // *** ĐÂY LÀ BƯỚC CỰC KỲ QUAN TRỌNG, NẾU THIẾU, LAYER SẼ KHÔNG ĐƯỢC TẠO RA. ***
-                    tr.AddNewlyCreatedDBObject(newLtr, true);
-
-                    // B6: Trả về ObjectId của layer vừa được tạo.
-                    return newLtr.ObjectId;
+                    ratr.Name = appName;
+                    tr.GetObject(db.RegAppTableId, OpenMode.ForWrite);
+                    rat.Add(ratr);
+                    tr.AddNewlyCreatedDBObject(ratr, true);
                 }
             }
         }
 
         #endregion
 
-        #region Geometry Creation
+        #region Geometry Creation (With XData Overloads)
 
-        /// <summary>
-        /// (Backend) Tạo một đối tượng Line và thêm vào ModelSpace.
-        /// Tự động tạo Layer nếu chưa tồn tại.
-        /// </summary>
-        /// <param name="db">Database của bản vẽ.</param>
-        /// <param name="startPt">Điểm bắt đầu.</param>
-        /// <param name="endPt">Điểm kết thúc.</param>
-        /// <param name="layerName">Tên Layer để đặt đối tượng.</param>
-        /// <param name="color">Màu của đối tượng (có thể là ACI hoặc TrueColor).</param>
-        /// <returns>ObjectId của Line vừa tạo.</returns>
+        // --- CreateLine ---
         public static ObjectId CreateLine(Database db, Point3d startPt, Point3d endPt, string layerName, AcColor color)
         {
+            return CreateLine(db, startPt, endPt, layerName, color, null);
+        }
+        public static ObjectId CreateLine(Database db, Point3d startPt, Point3d endPt, string layerName, AcColor color, DoorXData xdata)
+        {
             ObjectId lineId = ObjectId.Null;
-            // Bắt đầu một Transaction để thực hiện các thay đổi.
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                // Lấy về BlockTableRecord của ModelSpace ở chế độ ghi.
                 BlockTableRecord ms = tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite) as BlockTableRecord;
-
-                // *** PHẦN XỬ LÝ LAYER (TÍCH HỢP) ***
-                // Gọi hàm helper để lấy hoặc tạo layer và nhận về ObjectId của nó.
                 ObjectId layerId = GetOrCreateLayer(db, tr, layerName);
 
-                // Tạo đối tượng Line trong bộ nhớ với các thông số hình học.
-                // *** THÔNG SỐ HÌNH HỌC CƠ BẢN ***
                 using (Line line = new Line(startPt, endPt))
                 {
-                    // Gán các thuộc tính cho đối tượng.
-                    // *** THÔNG SỐ LAYER ***
+                    // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                     line.LayerId = layerId;
-
-                    // *** THÔNG SỐ MÀU SẮC ***
-                    // Đối tượng AcColor có thể chứa cả ACI và TrueColor, ta chỉ cần gán trực tiếp.
-                    // Yêu cầu hỗ trợ TrueColor đã được đáp ứng ở đây.
                     line.Color = color;
 
-                    // Thêm đối tượng Line vào ModelSpace.
+                    if (xdata != null)
+                    {
+                        RegisterApplicationName(db, tr, DoorXData.RegAppName);
+                        using (ResultBuffer rb = BuildXDataBuffer(xdata))
+                        {
+                            line.XData = rb;
+                        }
+                    }
+
                     ms.AppendEntity(line);
-                    // Đăng ký đối tượng mới với Transaction.
                     tr.AddNewlyCreatedDBObject(line, true);
-                    // Lấy ObjectId để trả về.
                     lineId = line.ObjectId;
                 }
-                // Lưu tất cả các thay đổi vào Database.
                 tr.Commit();
             }
             return lineId;
         }
 
-        /// <summary>
-        /// (Backend) Tạo một đối tượng Circle và thêm vào ModelSpace.
-        /// </summary>
+        // --- CreateCircle (ĐÃ BỔ SUNG) ---
         public static ObjectId CreateCircle(Database db, Point3d center, double radius, string layerName, AcColor color)
+        {
+            return CreateCircle(db, center, radius, layerName, color, null);
+        }
+        public static ObjectId CreateCircle(Database db, Point3d center, double radius, string layerName, AcColor color, DoorXData xdata)
         {
             ObjectId circleId = ObjectId.Null;
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 BlockTableRecord ms = tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite) as BlockTableRecord;
-
-                // *** PHẦN XỬ LÝ LAYER (TÍCH HỢP) ***
                 ObjectId layerId = GetOrCreateLayer(db, tr, layerName);
 
-                // *** THÔNG SỐ HÌNH HỌC CƠ BẢN ***
-                // Vector pháp tuyến mặc định là trục Z (0,0,1) cho hình tròn trong mặt phẳng XY.
                 using (Circle circle = new Circle(center, Vector3d.ZAxis, radius))
                 {
-                    // *** THÔNG SỐ LAYER ***
+                    // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                     circle.LayerId = layerId;
-                    // *** THÔNG SỐ MÀU SẮC ***
                     circle.Color = color;
+
+                    if (xdata != null)
+                    {
+                        RegisterApplicationName(db, tr, DoorXData.RegAppName);
+                        using (ResultBuffer rb = BuildXDataBuffer(xdata))
+                        {
+                            circle.XData = rb;
+                        }
+                    }
 
                     ms.AppendEntity(circle);
                     tr.AddNewlyCreatedDBObject(circle, true);
@@ -147,36 +135,39 @@ namespace MyAutoCAD2026Plugin
             return circleId;
         }
 
-        /// <summary>
-        /// (Backend) Tạo một đối tượng Polyline và thêm vào ModelSpace.
-        /// </summary>
+        // --- CreatePolyline ---
         public static ObjectId CreatePolyline(Database db, Point3dCollection points, string layerName, AcColor color)
         {
-            // Yêu cầu phải có ít nhất 2 điểm để tạo Polyline.
+            return CreatePolyline(db, points, layerName, color, null);
+        }
+        public static ObjectId CreatePolyline(Database db, Point3dCollection points, string layerName, AcColor color, DoorXData xdata)
+        {
             if (points.Count < 2) return ObjectId.Null;
-
             ObjectId plineId = ObjectId.Null;
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 BlockTableRecord ms = tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite) as BlockTableRecord;
-
-                // *** PHẦN XỬ LÝ LAYER (TÍCH HỢP) ***
                 ObjectId layerId = GetOrCreateLayer(db, tr, layerName);
 
-                // *** THÔNG SỐ HÌNH HỌC CƠ BẢN ***
                 using (Polyline pline = new Polyline())
                 {
-                    // Dùng vòng lặp để thêm từng đỉnh vào Polyline.
                     for (int i = 0; i < points.Count; i++)
                     {
-                        // Polyline 2D chỉ cần tọa độ X, Y.
                         pline.AddVertexAt(i, new Point2d(points[i].X, points[i].Y), 0, 0, 0);
                     }
 
-                    // *** THÔNG SỐ LAYER ***
+                    // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                     pline.LayerId = layerId;
-                    // *** THÔNG SỐ MÀU SẮC ***
                     pline.Color = color;
+
+                    if (xdata != null)
+                    {
+                        RegisterApplicationName(db, tr, DoorXData.RegAppName);
+                        using (ResultBuffer rb = BuildXDataBuffer(xdata))
+                        {
+                            pline.XData = rb;
+                        }
+                    }
 
                     ms.AppendEntity(pline);
                     tr.AddNewlyCreatedDBObject(pline, true);
@@ -187,36 +178,36 @@ namespace MyAutoCAD2026Plugin
             return plineId;
         }
 
-        /// <summary>
-        /// (Backend) Tạo một đối tượng Arc từ 3 điểm và thêm vào ModelSpace.
-        /// </summary>
-        /// <returns>ObjectId của Arc vừa tạo, hoặc ObjectId.Null nếu 3 điểm thẳng hàng.</returns>
+        // --- CreateArc (ĐÃ BỔ SUNG) ---
         public static ObjectId CreateArc(Database db, Point3d startPt, Point3d ptOnArc, Point3d endPt, string layerName, AcColor color)
+        {
+            return CreateArc(db, startPt, ptOnArc, endPt, layerName, color, null);
+        }
+        public static ObjectId CreateArc(Database db, Point3d startPt, Point3d ptOnArc, Point3d endPt, string layerName, AcColor color, DoorXData xdata)
         {
             ObjectId arcId = ObjectId.Null;
             try
             {
-                // *** THÔNG SỐ HÌNH HỌC CƠ BẢN (Tính toán) ***
-                // CircularArc3d là một lớp hình học thuần túy, không phải là đối tượng trong Database.
-                // Nó được dùng để tính toán tâm, bán kính, góc... từ 3 điểm.
-                // Nó sẽ ném ra một exception nếu 3 điểm thẳng hàng.
                 CircularArc3d tempArc = new CircularArc3d(startPt, ptOnArc, endPt);
-
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
                     BlockTableRecord ms = tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite) as BlockTableRecord;
-
-                    // *** PHẦN XỬ LÝ LAYER (TÍCH HỢP) ***
                     ObjectId layerId = GetOrCreateLayer(db, tr, layerName);
 
-                    // *** THÔNG SỐ HÌNH HỌC CƠ BẢN (Tạo đối tượng) ***
-                    // Tạo đối tượng Arc thực sự từ các thông số đã tính toán được.
                     using (Arc arc = new Arc(tempArc.Center, tempArc.Radius, tempArc.StartAngle, tempArc.EndAngle))
                     {
-                        // *** THÔNG SỐ LAYER ***
+                        // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                         arc.LayerId = layerId;
-                        // *** THÔNG SỐ MÀU SẮC ***
                         arc.Color = color;
+
+                        if (xdata != null)
+                        {
+                            RegisterApplicationName(db, tr, DoorXData.RegAppName);
+                            using (ResultBuffer rb = BuildXDataBuffer(xdata))
+                            {
+                                arc.XData = rb;
+                            }
+                        }
 
                         ms.AppendEntity(arc);
                         tr.AddNewlyCreatedDBObject(arc, true);
@@ -225,16 +216,80 @@ namespace MyAutoCAD2026Plugin
                     tr.Commit();
                 }
             }
-            catch (Autodesk.AutoCAD.Runtime.Exception ex)
+            catch (Autodesk.AutoCAD.Runtime.Exception)
             {
-                // Bắt lỗi nếu 3 điểm thẳng hàng.
-                // Trong môi trường backend, ta không nên hiển thị thông báo.
-                // Việc thông báo cho người dùng là của frontend.
-                // Ta chỉ cần trả về ObjectId.Null để báo hiệu thao tác thất bại.
-                System.Diagnostics.Debug.WriteLine($"Error creating arc: {ex.Message}");
                 return ObjectId.Null;
             }
             return arcId;
+        }
+
+        #endregion
+
+        #region XData Utilities
+
+        /// <summary>
+        /// (Backend-Private) Hàm helper để xây dựng ResultBuffer từ đối tượng DoorXData.
+        /// Giúp tránh lặp lại code.
+        /// </summary>
+        private static ResultBuffer BuildXDataBuffer(DoorXData xdata)
+        {
+            ResultBuffer rb = new ResultBuffer(
+                new TypedValue((int)DxfCode.ExtendedDataRegAppName, DoorXData.RegAppName),
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, xdata.DoorType),
+                new TypedValue((int)DxfCode.ExtendedDataReal, xdata.Height),
+                new TypedValue((int)DxfCode.ExtendedDataReal, xdata.Width),
+                new TypedValue((int)DxfCode.ExtendedDataControlString, "{"));
+
+            foreach (ObjectId id in xdata.ChildIds)
+            {
+                rb.Add(new TypedValue((int)DxfCode.ExtendedDataHandle, id.Handle.Value.ToString()));
+            }
+            rb.Add(new TypedValue((int)DxfCode.ExtendedDataControlString, "}"));
+            return rb;
+        }
+
+        public static DoorXData ReadDoorXData(Database db, ObjectId entityId)
+        {
+            DoorXData data = null;
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                Entity ent = tr.GetObject(entityId, OpenMode.ForRead) as Entity;
+                if (ent == null) return null;
+
+                ResultBuffer rb = ent.GetXDataForApplication(DoorXData.RegAppName);
+                if (rb == null) return null;
+
+                using (rb)
+                {
+                    List<TypedValue> values = rb.AsArray().ToList();
+                    data = new DoorXData
+                    {
+                        DoorType = values[1].Value.ToString(),
+                        Height = (double)values[2].Value,
+                        Width = (double)values[3].Value
+                    };
+
+                    bool isReadingHandles = false;
+                    foreach (TypedValue tv in values)
+                    {
+                        if (tv.TypeCode == (int)DxfCode.ExtendedDataControlString && tv.Value.ToString() == "{")
+                        {
+                            isReadingHandles = true;
+                            continue;
+                        }
+                        if (tv.TypeCode == (int)DxfCode.ExtendedDataControlString && tv.Value.ToString() == "}") break;
+
+                        if (isReadingHandles && tv.TypeCode == (int)DxfCode.ExtendedDataHandle)
+                        {
+                            if (db.TryGetObjectId(new Handle(long.Parse(tv.Value.ToString(), System.Globalization.NumberStyles.HexNumber)), out ObjectId childId))
+                            {
+                                data.ChildIds.Add(childId);
+                            }
+                        }
+                    }
+                }
+            }
+            return data;
         }
 
         #endregion
