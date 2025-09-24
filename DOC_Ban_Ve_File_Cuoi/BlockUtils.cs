@@ -98,70 +98,74 @@ namespace MyAutoCAD2026Plugin.Backend
         /// <returns>ObjectId của BlockTableRecord đã được nhập khẩu, hoặc ObjectId.Null nếu thất bại.</returns>
         public static ObjectId ImportBlockDefinition(Database targetDb, string sourceFilePath, string blockName)
         {
-            // --- PHẦN CODE QUAN TRỌNG: ĐỌC DATABASE TỪ FILE NGOÀI ---
-            // Mở một database tạm thời trong bộ nhớ để đọc file DWG nguồn.
-            // 'false' nghĩa là không tạo file mới, 'true' nghĩa là đọc file có sẵn.
+            // === PHẦN SỬA LỖI BẮT ĐẦU TỪ ĐÂY ===
+
+            ObjectId blockIdToCopy = ObjectId.Null;
+
+            // BƯỚC 1: Mở database nguồn, tìm block cần sao chép và chỉ lấy về ObjectId của nó.
+            // Hoàn thành tất cả công việc trên database nguồn trong một giao dịch duy nhất.
             using (Database sourceDb = new Database(false, true))
             {
                 try
                 {
-                    // Đọc nội dung file DWG vào đối tượng sourceDb.
-                    // FileShare.Read cho phép các ứng dụng khác vẫn có thể đọc file này trong lúc ta đang xử lý.
                     sourceDb.ReadDwgFile(sourceFilePath, FileShare.Read, true, "");
                 }
                 catch (Autodesk.AutoCAD.Runtime.Exception ex)
                 {
-                    // Bắt các lỗi cụ thể của AutoCAD, ví dụ file không tìm thấy, phiên bản không hỗ trợ...
-                    // Trong backend, ta không hiển thị thông báo. Có thể ghi log lỗi ở đây.
                     System.Diagnostics.Debug.WriteLine($"Lỗi khi đọc file DWG: {ex.Message}");
-                    return ObjectId.Null; // Trả về Null báo hiệu thất bại.
+                    return ObjectId.Null;
                 }
 
-                // --- PHẦN CODE QUAN TRỌNG: SAO CHÉP DỮ LIỆU GIỮA 2 DATABASE ---
-                // Bắt đầu transaction trên cả hai database.
+                // Bắt đầu giao dịch CHỈ trên database nguồn.
                 using (Transaction sourceTrans = sourceDb.TransactionManager.StartTransaction())
-                using (Transaction targetTrans = targetDb.TransactionManager.StartTransaction())
                 {
-                    // Lấy BlockTable từ database nguồn.
                     BlockTable sourceBt = sourceTrans.GetObject(sourceDb.BlockTableId, OpenMode.ForRead) as BlockTable;
-
-                    // Kiểm tra xem block có tồn tại trong file nguồn không.
                     if (!sourceBt.Has(blockName))
                     {
-                        return ObjectId.Null;
+                        return ObjectId.Null; // Không tìm thấy block trong file nguồn.
                     }
+                    // Lấy ObjectId và lưu vào một biến.
+                    blockIdToCopy = sourceBt[blockName];
+                } // Giao dịch trên sourceDb được đóng lại ngay tại đây.
+            } // Database nguồn cũng được hủy ngay tại đây. Công việc với nó đã xong.
 
-                    // Lấy BlockTable từ database đích.
-                    BlockTable targetBt = targetTrans.GetObject(targetDb.BlockTableId, OpenMode.ForRead) as BlockTable;
+            // Nếu không tìm thấy block, kết thúc sớm.
+            if (blockIdToCopy.IsNull) return ObjectId.Null;
 
-                    // Nếu block đã có trong bản vẽ đích, chỉ cần lấy ObjectId của nó và trả về.
-                    if (targetBt.Has(blockName))
-                    {
-                        return targetBt[blockName];
-                    }
 
-                    // Nếu chưa có, tiến hành nhập khẩu.
-                    // Chuẩn bị một collection chứa ObjectId của các đối tượng cần sao chép.
-                    ObjectIdCollection idsToCopy = new ObjectIdCollection();
-                    idsToCopy.Add(sourceBt[blockName]);
+            // BƯỚC 2: Mở một giao dịch mới trên database đích để thực hiện việc sao chép.
+            // Giao dịch này hoàn toàn độc lập với giao dịch ở trên.
+            using (Transaction targetTrans = targetDb.TransactionManager.StartTransaction())
+            {
+                // Lấy BlockTable của database đích.
+                BlockTable targetBt = targetTrans.GetObject(targetDb.BlockTableId, OpenMode.ForRead) as BlockTable;
 
-                    // Nâng cấp quyền để có thể ghi vào BlockTable đích.
-                    targetBt.UpgradeOpen();
-
-                    // Đây là hàm "phép màu" của AutoCAD API. Nó sẽ sao chép các đối tượng
-                    // từ sourceDb sang targetDb.
-                    // DuplicateRecordCloning.Replace: Nếu một đối tượng phụ thuộc (ví dụ layer)
-                    // đã tồn tại ở đích, nó sẽ được thay thế bằng cái từ nguồn.
-                    IdMapping idMap = new IdMapping();
-                    targetDb.WblockCloneObjects(idsToCopy, targetBt.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
-
-                    // Commit transaction đích để lưu lại block mới.
-                    targetTrans.Commit();
-
-                    // Lấy ObjectId của block mới được tạo ra trong database đích.
-                    return idMap[sourceBt[blockName]].Value;
+                // Kiểm tra xem block đã tồn tại trong bản vẽ đích chưa.
+                if (targetBt.Has(blockName))
+                {
+                    return targetBt[blockName]; // Nếu có, trả về ObjectId của nó và không làm gì thêm.
                 }
+
+                // Nâng cấp quyền để có thể ghi vào BlockTable đích.
+                targetBt.UpgradeOpen();
+
+                // Chuẩn bị một collection để chứa ObjectId cần sao chép.
+                ObjectIdCollection idsToCopy = new ObjectIdCollection();
+                idsToCopy.Add(blockIdToCopy);
+
+                // Thực hiện sao chép.
+                IdMapping idMap = new IdMapping();
+                // NOTE: Dòng lệnh quan trọng WblockCloneObjects giờ được gọi trong một bối cảnh an toàn hơn nhiều.
+                targetDb.WblockCloneObjects(idsToCopy, targetBt.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
+
+                // Lưu các thay đổi vào database đích.
+                targetTrans.Commit();
+
+                // Lấy ObjectId của block mới được tạo ra trong database đích.
+                // idMap chứa ánh xạ từ ObjectId cũ (trong file nguồn) sang ObjectId mới (trong file đích).
+                return idMap[blockIdToCopy].Value;
             }
+            // === KẾT THÚC PHẦN SỬA LỖI ===
         }
 
 
