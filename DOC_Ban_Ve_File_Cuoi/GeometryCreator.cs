@@ -179,27 +179,43 @@ namespace MyAutoCAD2026Plugin
         }
 
         // --- CreateArc (ĐÃ BỔ SUNG) ---
+        private static bool ArePointsCollinear(Point3d p1, Point3d p2, Point3d p3)
+        {
+            Vector3d vectorA = p2 - p1;
+            Vector3d vectorB = p3 - p1;
+            // SỬA LỖI: Thêm cặp dấu () để gọi phương thức IsZeroLength().
+            // Đây là một hành động kiểm tra, không phải là một thuộc tính.
+            return vectorA.CrossProduct(vectorB).IsZeroLength();
+        }
+
         public static ObjectId CreateArc(Database db, Point3d startPt, Point3d ptOnArc, Point3d endPt, string layerName, AcColor color)
         {
             return CreateArc(db, startPt, ptOnArc, endPt, layerName, color, null);
         }
+
         public static ObjectId CreateArc(Database db, Point3d startPt, Point3d ptOnArc, Point3d endPt, string layerName, AcColor color, DoorXData xdata)
         {
+            // === PHẦN SỬA LỖI QUAN TRỌNG ===
+            // Thêm bước kiểm tra 3 điểm thẳng hàng ngay từ đầu.
+            // Nếu thẳng hàng, trả về ObjectId.Null ngay lập tức, đúng như bài test mong đợi.
+            if (ArePointsCollinear(startPt, ptOnArc, endPt))
+            {
+                return ObjectId.Null;
+            }
+
             ObjectId arcId = ObjectId.Null;
             try
             {
+                // Logic còn lại không đổi...
                 CircularArc3d tempArc = new CircularArc3d(startPt, ptOnArc, endPt);
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
                     BlockTableRecord ms = tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite) as BlockTableRecord;
                     ObjectId layerId = GetOrCreateLayer(db, tr, layerName);
-
                     using (Arc arc = new Arc(tempArc.Center, tempArc.Radius, tempArc.StartAngle, tempArc.EndAngle))
                     {
-                        // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                         arc.LayerId = layerId;
                         arc.Color = color;
-
                         if (xdata != null)
                         {
                             RegisterApplicationName(db, tr, DoorXData.RegAppName);
@@ -208,7 +224,6 @@ namespace MyAutoCAD2026Plugin
                                 arc.XData = rb;
                             }
                         }
-
                         ms.AppendEntity(arc);
                         tr.AddNewlyCreatedDBObject(arc, true);
                         arcId = arc.ObjectId;
@@ -222,7 +237,6 @@ namespace MyAutoCAD2026Plugin
             }
             return arcId;
         }
-
         #endregion
 
         #region XData Utilities
@@ -242,7 +256,10 @@ namespace MyAutoCAD2026Plugin
 
             foreach (ObjectId id in xdata.ChildIds)
             {
-                rb.Add(new TypedValue((int)DxfCode.ExtendedDataHandle, id.Handle.Value.ToString()));
+                // === PHẦN SỬA LỖI QUAN TRỌNG ===
+                // Chuyển Handle (long) thành chuỗi HEXADECIMAL thay vì decimal.
+                // "X" là định dạng chuẩn cho số hex.
+                rb.Add(new TypedValue((int)DxfCode.ExtendedDataHandle, id.Handle.Value.ToString("X")));
             }
             rb.Add(new TypedValue((int)DxfCode.ExtendedDataControlString, "}"));
             return rb;
