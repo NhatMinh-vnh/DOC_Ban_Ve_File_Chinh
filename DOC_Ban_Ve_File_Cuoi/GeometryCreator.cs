@@ -29,13 +29,27 @@ namespace MyAutoCAD2026Plugin
 
         private static ObjectId GetOrCreateLayer(Database db, Transaction tr, string layerName)
         {
+            // === REFACTOR: BƯỚC PHÒNG THỦ QUAN TRỌNG NHẤT ===
+            // Kiểm tra xem layerName có phải là null, rỗng, hoặc chỉ chứa khoảng trắng không.
+            // Nếu không hợp lệ, gán giá trị mặc định là "0".
+            if (string.IsNullOrWhiteSpace(layerName))
+            {
+                layerName = "0";
+            }
+            // =================================================
+
             LayerTable lt = tr.GetObject(db.LayerTableId, OpenMode.ForRead) as LayerTable;
+
+            // Giờ đây, dòng code này đã hoàn toàn an toàn vì layerName luôn là một chuỗi hợp lệ.
             if (lt.Has(layerName)) return lt[layerName];
+
+            // Nâng cấp LayerTable lên quyền ghi CHỈ KHI thực sự cần tạo layer mới.
+            tr.GetObject(db.LayerTableId, OpenMode.ForWrite);
 
             using (LayerTableRecord newLtr = new LayerTableRecord())
             {
+                // Dòng code này cũng đã an toàn.
                 newLtr.Name = layerName;
-                tr.GetObject(db.LayerTableId, OpenMode.ForWrite);
                 lt.Add(newLtr);
                 tr.AddNewlyCreatedDBObject(newLtr, true);
                 return newLtr.ObjectId;
@@ -47,10 +61,10 @@ namespace MyAutoCAD2026Plugin
             RegAppTable rat = tr.GetObject(db.RegAppTableId, OpenMode.ForRead) as RegAppTable;
             if (!rat.Has(appName))
             {
+                tr.GetObject(db.RegAppTableId, OpenMode.ForWrite);
                 using (RegAppTableRecord ratr = new RegAppTableRecord())
                 {
                     ratr.Name = appName;
-                    tr.GetObject(db.RegAppTableId, OpenMode.ForWrite);
                     rat.Add(ratr);
                     tr.AddNewlyCreatedDBObject(ratr, true);
                 }
@@ -76,7 +90,6 @@ namespace MyAutoCAD2026Plugin
 
                 using (Line line = new Line(startPt, endPt))
                 {
-                    // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                     line.LayerId = layerId;
                     line.Color = color;
 
@@ -98,7 +111,7 @@ namespace MyAutoCAD2026Plugin
             return lineId;
         }
 
-        // --- CreateCircle (ĐÃ BỔ SUNG) ---
+        // --- CreateCircle ---
         public static ObjectId CreateCircle(Database db, Point3d center, double radius, string layerName, AcColor color)
         {
             return CreateCircle(db, center, radius, layerName, color, null);
@@ -113,7 +126,6 @@ namespace MyAutoCAD2026Plugin
 
                 using (Circle circle = new Circle(center, Vector3d.ZAxis, radius))
                 {
-                    // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                     circle.LayerId = layerId;
                     circle.Color = color;
 
@@ -156,7 +168,6 @@ namespace MyAutoCAD2026Plugin
                         pline.AddVertexAt(i, new Point2d(points[i].X, points[i].Y), 0, 0, 0);
                     }
 
-                    // === PHẦN XỬ LÝ LAYER VÀ MÀU SẮC (VẪN GIỮ NGUYÊN) ===
                     pline.LayerId = layerId;
                     pline.Color = color;
 
@@ -178,13 +189,11 @@ namespace MyAutoCAD2026Plugin
             return plineId;
         }
 
-        // --- CreateArc (ĐÃ BỔ SUNG) ---
+        // --- CreateArc ---
         private static bool ArePointsCollinear(Point3d p1, Point3d p2, Point3d p3)
         {
             Vector3d vectorA = p2 - p1;
             Vector3d vectorB = p3 - p1;
-            // SỬA LỖI: Thêm cặp dấu () để gọi phương thức IsZeroLength().
-            // Đây là một hành động kiểm tra, không phải là một thuộc tính.
             return vectorA.CrossProduct(vectorB).IsZeroLength();
         }
 
@@ -195,9 +204,6 @@ namespace MyAutoCAD2026Plugin
 
         public static ObjectId CreateArc(Database db, Point3d startPt, Point3d ptOnArc, Point3d endPt, string layerName, AcColor color, DoorXData xdata)
         {
-            // === PHẦN SỬA LỖI QUAN TRỌNG ===
-            // Thêm bước kiểm tra 3 điểm thẳng hàng ngay từ đầu.
-            // Nếu thẳng hàng, trả về ObjectId.Null ngay lập tức, đúng như bài test mong đợi.
             if (ArePointsCollinear(startPt, ptOnArc, endPt))
             {
                 return ObjectId.Null;
@@ -206,7 +212,6 @@ namespace MyAutoCAD2026Plugin
             ObjectId arcId = ObjectId.Null;
             try
             {
-                // Logic còn lại không đổi...
                 CircularArc3d tempArc = new CircularArc3d(startPt, ptOnArc, endPt);
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
@@ -241,10 +246,6 @@ namespace MyAutoCAD2026Plugin
 
         #region XData Utilities
 
-        /// <summary>
-        /// (Backend-Private) Hàm helper để xây dựng ResultBuffer từ đối tượng DoorXData.
-        /// Giúp tránh lặp lại code.
-        /// </summary>
         private static ResultBuffer BuildXDataBuffer(DoorXData xdata)
         {
             ResultBuffer rb = new ResultBuffer(
@@ -256,9 +257,6 @@ namespace MyAutoCAD2026Plugin
 
             foreach (ObjectId id in xdata.ChildIds)
             {
-                // === PHẦN SỬA LỖI QUAN TRỌNG ===
-                // Chuyển Handle (long) thành chuỗi HEXADECIMAL thay vì decimal.
-                // "X" là định dạng chuẩn cho số hex.
                 rb.Add(new TypedValue((int)DxfCode.ExtendedDataHandle, id.Handle.Value.ToString("X")));
             }
             rb.Add(new TypedValue((int)DxfCode.ExtendedDataControlString, "}"));
